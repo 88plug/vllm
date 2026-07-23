@@ -129,6 +129,10 @@ _ON_MI3XX = any(arch in _GCN_ARCH for arch in ["gfx942", "gfx950"])
 _ON_GFX9 = any(arch in _GCN_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
 _ON_GFX942 = "gfx942" in _GCN_ARCH
 _ON_GFX950 = "gfx950" in _GCN_ARCH
+# Rembrandt 680M (gfx1035) + Navi21 dGPU (gfx1030): RDNA2 — no HW bf16
+_ON_GFX103X = any(x in _GCN_ARCH for x in ("gfx1030", "gfx1035", "gfx1031", "gfx1032", "gfx1033", "gfx1034", "gfx1036"))
+_ON_GFX1035 = "gfx1035" in _GCN_ARCH
+
 
 
 def on_gfx1x() -> bool:
@@ -649,8 +653,26 @@ class RocmPlatform(Platform):
         return cuda_device_count_stateless()
 
     @classmethod
+    def supported_dtypes(cls) -> list[torch.dtype]:
+        """RDNA2 (gfx103x) has no HW bf16 — prefer float16 first (auto dtype).
+
+        Upstream default lists bfloat16 first, which silently software-emulates
+        on RDNA2 and yields single-digit tok/s at 99% GPU util (vllm#38107).
+        """
+        if _ON_GFX103X:
+            return [torch.float16, torch.float32]
+        return [torch.bfloat16, torch.float16, torch.float32]
+
+    @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):
-        if dtype == torch.bfloat16:  # noqa: SIM102
+        if dtype == torch.bfloat16:
+            # RDNA2: no hardware bf16 — refuse, do not use NVIDIA sm80 heuristic alone
+            if _ON_GFX103X:
+                raise ValueError(
+                    f"Bfloat16 is not supported on RDNA2 GCN arch {_GCN_ARCH!r} "
+                    f"({cls.get_device_name()}). Use --dtype float16 / half. "
+                    "See https://github.com/vllm-project/vllm/issues/38107"
+                )
             if not cls.has_device_capability(80):
                 capability = cls.get_device_capability()
                 gpu_name = cls.get_device_name()
